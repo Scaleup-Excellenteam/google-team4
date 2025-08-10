@@ -1,149 +1,170 @@
-"""
-Search and Scoring Module for Autocomplete System
+from typing import List, Dict, Set, Tuple, Optional
+from .models import Corpus, Sentence, AutoCompleteData
+from .config import TOP_K, GRAM, BUILD_INDEX
+from . import loader
+from . import index as index_mod
 
-This module implements the core search algorithms and scoring functions for
-the autocomplete system. It provides functions to find matching sentences
-and rank them according to the project's scoring criteria.
+def _grams(s: str, g: int) -> List[str]:
+    n = len(s)
+    if n == 0:
+        return []
+    if n < g:
+        return [s[i:j] for i in range(n) for j in range(i+1, n+1)]
+    return [s[i:i+g] for i in range(0, n-g+1)]
 
-The search process:
-1. Find candidate sentences that match the given prefix
-2. Score each candidate based on match quality and position
-3. Rank results by score and return top-k completions
+def _candidate_ids(corpus: Corpus, q_norm: str) -> List[int]:
+    if BUILD_INDEX:
+        if corpus.index is None:
+            corpus.index = index_mod.build(corpus, gram=GRAM)
+        if len(q_norm) >= GRAM:
+            grams = _grams(q_norm, GRAM)
+            sets: List[Set[int]] = []
+            for g in grams:
+                ids = corpus.index.get(g)
+                if not ids:
+                    return []
+                sets.append(ids)
+            cand: Set[int] = set.intersection(*sets) if sets else set()
+            return sorted(cand)
+    return [s.id for s in corpus.sentences]
 
-Scoring Algorithm:
-- Base score: 2 × number of matched characters
-- Position penalties: Single edit penalties based on position
-- Tie-breaking: Alphabetical order of completed sentence
+def _exact_substring(s_norm: str, q_norm: str) -> List[int]:
+    starts = []
+    start = 0
+    while True:
+        pos = s_norm.find(q_norm, start)
+        if pos == -1: break
+        starts.append(pos)
+        start = pos + 1
+    return starts
 
-Key Functions:
-    run(corpus, prefix, k): Main search function returning top-k results
-    find_matches(corpus, prefix): Find all sentences matching the prefix
-    score_match(prefix, sentence, offset): Score a single match
-    rank_results(matches, k): Rank and return top-k results
+def _replace_match(s_norm: str, q_norm: str) -> List[Tuple[int,int]]:
+    n, m = len(s_norm), len(q_norm)
+    out = []
+    for start in range(0, n - m + 1):
+        mismatches = 0
+        pos = -1
+        for i in range(m):
+            if s_norm[start + i] != q_norm[i]:
+                mismatches += 1; pos = i + 1
+                if mismatches > 1: break
+        if mismatches == 1:
+            out.append((start, pos))
+    return out
 
-Note:
-    This module is currently a placeholder for future implementation.
-    When implemented, it will provide the core search functionality
-    that the engine module delegates to.
+def _insert_match(s_norm: str, q_norm: str) -> List[Tuple[int,int]]:
+    m = len(q_norm)
+    out = []
+    for i in range(m):
+        q2 = q_norm[:i] + q_norm[i+1:]
+        pos = s_norm.find(q2)
+        if pos != -1:
+            out.append((pos, i + 1))
+    return out
 
-Author: Google Team 4
-"""
+def _delete_match(s_norm: str, q_norm: str) -> List[Tuple[int,int]]:
+    n, m = len(s_norm), len(q_norm)
+    win = m + 1
+    out = []
+    for start in range(0, n - win + 1):
+        i = j = 0
+        used = False
+        while i < m and j < win:
+            if q_norm[i] == s_norm[start + j]:
+                i += 1; j += 1
+            elif not used:
+                used = True; j += 1  # skip one s char
+            else:
+                break
+        if i == m:
+            out.append((start, i + 1))
+    return out
 
-from typing import List
-from .models import Corpus, AutoCompleteData
+def _score(L: int, edit_type: Optional[str], edit_pos: Optional[int]) -> int:
+    base = 2 * (L if edit_type in (None, "delete") else (L - 1))
+    if edit_type is None or edit_pos is None:
+        return base
+    p = max(1, min(edit_pos, 5))
+    pen = ({1:-5,2:-4,3:-3,4:-2,5:-1} if edit_type == "replace" else {1:-10,2:-8,3:-6,4:-4,5:-2})[p]
+    return base + pen
 
-def run(corpus: Corpus, prefix: str, k: int) -> List[AutoCompleteData]:
-    """
-    Main search function that finds and returns the best k completions.
-    
-    This function orchestrates the complete search process:
-    1. Normalizes the input prefix
-    2. Finds candidate sentences matching the prefix
-    3. Scores and ranks the candidates
-    4. Returns the top-k results
-    
-    Args:
-        corpus: The loaded corpus to search through
-        prefix: The text prefix to find completions for
-        k: Maximum number of results to return
-        
-    Returns:
-        List[AutoCompleteData]: Ranked list of completion suggestions
-        
-    Example:
-        >>> results = run(corpus, "hello wo", 5)
-        >>> len(results)
-        5
-        >>> results[0].completed_sentence
-        'hello world, how are you today?'
-        
-    Note:
-        This is currently a placeholder implementation that returns an empty list.
-        The actual implementation will integrate with the scoring and ranking
-        functions to provide meaningful autocomplete results.
-    """
-    # TODO: Implement search functionality
-    # 1. Normalize prefix using loader.normalize()
-    # 2. Find matching sentences
-    # 3. Score and rank results
-    # 4. Return top-k AutoCompleteData objects
-    return []
+def _offset_in_line(original: str, norm_start: int) -> int:
+    s = original.casefold()
+    i = 0
+    n = len(s)
+    norm_idx = 0
+    while i < n:
+        ch = s[i]
+        if ch.isspace():
+            j = i
+            while j < n and s[j].isspace():
+                j += 1
+            if norm_idx != 0:
+                if norm_idx == norm_start:
+                    return i
+                norm_idx += 1
+            i = j
+            continue
+        import unicodedata
+        if unicodedata.category(ch).startswith(("P","S")):
+            i += 1
+            continue
+        if norm_idx == norm_start:
+            return i
+        norm_idx += 1
+        i += 1
+    return 0
 
-def find_matches(corpus: Corpus, prefix: str) -> List[tuple]:
-    """
-    Find all sentences in the corpus that match the given prefix.
-    
-    This function searches through the normalized text of all sentences
-    to find those that start with the normalized prefix. It returns
-    tuples containing the sentence and the offset where the match begins.
-    
-    Args:
-        corpus: The corpus to search through
-        prefix: The normalized prefix to match
-        
-    Returns:
-        List[tuple]: List of (sentence, offset) tuples for matches
-        
-    Note:
-        This function will be implemented to provide efficient prefix matching,
-        potentially using the n-gram index if available for performance.
-    """
-    # TODO: Implement prefix matching
-    # 1. Normalize prefix
-    # 2. Search through sentence.normalized fields
-    # 3. Return matches with offsets
-    pass
+def _file_offset(prefix_sums, path: str, line_no: int, offset_in_line: int) -> int:
+    cumul = prefix_sums.get(path, [])
+    start_of_line = 0 if line_no <= 1 else cumul[line_no - 2]
+    return start_of_line + offset_in_line
 
-def score_match(prefix: str, sentence, offset: int) -> int:
-    """
-    Score a single sentence match according to the project's scoring criteria.
-    
-    The scoring algorithm follows these rules:
-    - Base score: 2 × number of matched characters
-    - Position penalties: Single edit penalties based on position
-    - Tie-breaking: Alphabetical order of completed sentence
-    
-    Args:
-        prefix: The normalized prefix that was matched
-        sentence: The Sentence object that matched
-        offset: Character offset where the match begins
-        
-    Returns:
-        int: Computed score for ranking
-        
-    Note:
-        This function implements the exact scoring algorithm specified
-        in the project requirements for consistent result ranking.
-    """
-    # TODO: Implement scoring algorithm
-    # 1. Calculate base score (2 × matched chars)
-    # 2. Apply position-based penalties
-    # 3. Return final score
-    pass
+def run(corpus: Corpus, prefix: str, k: int = TOP_K) -> List[AutoCompleteData]:
+    q_norm = loader.normalize(prefix)
+    if not q_norm:
+        return []
+    ids = _candidate_ids(corpus, q_norm)
+    if not ids:
+        return []
 
-def rank_results(matches: List[tuple], k: int) -> List[AutoCompleteData]:
-    """
-    Rank matches by score and return the top-k results.
-    
-    This function takes the raw matches, scores them, and returns
-    the top-k results as AutoCompleteData objects. It handles
-    tie-breaking by alphabetical order of completed sentences.
-    
-    Args:
-        matches: List of (sentence, offset) tuples from find_matches
-        k: Maximum number of results to return
-        
-    Returns:
-        List[AutoCompleteData]: Ranked list of completion results
-        
-    Note:
-        This function creates the final AutoCompleteData objects
-        that are returned to the user, including all required fields.
-    """
-    # TODO: Implement result ranking
-    # 1. Score all matches
-    # 2. Sort by score (descending)
-    # 3. Apply tie-breaking rules
-    # 4. Create AutoCompleteData objects
-    # 5. Return top-k results
-    pass
+    by_id: Dict[int, Sentence] = {s.id: s for s in corpus.sentences}
+    L = len(q_norm)
+
+    results: List[Tuple[int, int, Optional[str], Optional[int], Sentence]] = []
+    for sid in ids:
+        s = by_id[sid]
+        best = (-10**9, 10**9, None, None, -1)
+        for st in _exact_substring(s.normalized, q_norm):
+            best = max(best, (_score(L, None, None), -st, None, None, st))
+        for st, pos in _replace_match(s.normalized, q_norm):
+            best = max(best, (_score(L, "replace", pos), -st, "replace", pos, st))
+        for st, pos in _insert_match(s.normalized, q_norm):
+            best = max(best, (_score(L, "insert", pos), -st, "insert", pos, st))
+        for st, pos in _delete_match(s.normalized, q_norm):
+            best = max(best, (_score(L, "delete", pos), -st, "delete", pos, st))
+        if best[0] == -10**9:
+            continue
+        score, neg_start, etype, epos, start_norm = best
+        off_in_line = _offset_in_line(s.original, start_norm)
+        file_off = _file_offset(corpus.file_prefix_sums, s.path, s.line_no, off_in_line)
+        results.append((score, -neg_start, etype, epos, s, file_off))
+
+    if not results:
+        return []
+
+    out: List[AutoCompleteData] = []
+    seen = set()
+    for score, start, etype, epos, s, file_off in results:
+        key = (s.path, s.line_no, file_off, score)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(AutoCompleteData(
+            completed_sentence=s.original,
+            source_text=s.path,
+            offset=file_off,
+            score=score
+        ))
+    out.sort(key=lambda r: (-r.score, r.completed_sentence))
+    return out[:k]

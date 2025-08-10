@@ -1,53 +1,31 @@
-"""
-Configuration Module for Autocomplete System
+from __future__ import annotations
+from pathlib import Path
 
-This module contains all configuration constants and settings used throughout
-the autocomplete system. It centralizes configuration values to make them
-easy to modify and maintain.
+# project root: auto_complete/
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-The configuration includes:
-- Search parameters (TOP_K, GRAM)
-- Feature flags (BUILD_INDEX)
-- File processing settings (ENCODING, GLOB_PATTERN)
+# where your data files live
+#DATA_ROOT = PROJECT_ROOT / "data"
+DATA_ROOT = PROJECT_ROOT / "Archive"
 
-All constants are documented with their purpose and usage context.
-Modifying these values will affect the behavior of the entire system.
+# file types to include
+INCLUDE_EXTS = [".txt", ".md", ".csv", ".log", ".json", ".xml"]
 
-Author: Google Team 4
-"""
+# folders to skip
+EXCLUDE_DIRS = {".git", ".hg", ".svn", ".idea", ".vscode", "node_modules", "__pycache__"}
 
-# src/autocomplete/config.py
+# reading mode:
+# - "threads" for I/O-bound (fast reading)
+# - "procs" for CPU-heavy per-file processing
+READ_MODE = "threads"
 
-# Search and ranking configuration
+# workers
+_cpu = __import__("os").cpu_count() or 4
+DEFAULT_WORKERS_THREADS = _cpu * 2
+DEFAULT_WORKERS_PROCS = _cpu
+WORKERS = DEFAULT_WORKERS_THREADS if READ_MODE == "threads" else DEFAULT_WORKERS_PROCS
+
+# search/index config
 TOP_K = 5
-"""
-Maximum number of completion suggestions to return.
-This controls how many results are shown to the user.
-"""
-
-GRAM = 3
-"""
-N-gram size for building inverted index (if enabled).
-Larger values provide more context but increase memory usage.
-"""
-
-BUILD_INDEX = False
-"""
-Flag to control whether to build an n-gram inverted index.
-When True, builds an index for faster substring matching.
-When False, uses linear search through all sentences.
-"""
-
-# File processing configuration
-ENCODING = "utf-8"
-"""
-Text encoding for reading input files.
-Used when opening .txt files for corpus loading.
-"""
-
-GLOB_PATTERN = "*.txt"
-"""
-File pattern for corpus loading.
-Only files matching this pattern will be processed.
-Supports standard glob syntax (e.g., "*.txt", "**/*.md").
-"""
+GRAM = 3               # n-gram size for the inverted index
+BUILD_INDEX = True     # build index lazily on first search
