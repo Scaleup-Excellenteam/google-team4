@@ -1,0 +1,24 @@
+.
+├── auto_complete
+│   ├── README.md
+│   └── src
+│       └── autocomplete
+│           ├── config.py
+│           ├── engine.py
+│           ├── index.py
+│           ├── __init__.py
+│           ├── loader.py
+│           ├── __main__.py
+│           ├── models.py
+│           └── search.py
+├── data
+│   └── sample
+│       └── a.txt
+├── README.md
+├── students_materials
+│   ├── Archive.zip
+│   ├── google_project_definition.pdf
+│   └── Using Gemini API.pdf
+└── tree.txt
+
+7 directories, 15 files
