@@ -6,8 +6,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # where your data files live
 #DATA_ROOT = PROJECT_ROOT / "data"
-DATA_ROOT = PROJECT_ROOT / "Archive"
-
+DATA_ROOT = PROJECT_ROOT
 # file types to include
 INCLUDE_EXTS = [".txt", ".md", ".csv", ".log", ".json", ".xml"]
 

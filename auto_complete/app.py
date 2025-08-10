@@ -1,326 +1,360 @@
 # app.py
-# CustomTkinter GUI for the Autocomplete project (dark theme, ZIP-aware).
-# - Load from a folder OR a ZIP archive (ZIP extracted safely to a temp dir).
-# - Background loading thread (keeps UI responsive).
-# - Live search with debounce; results & event log panes.
+# CustomTkinter (dark theme) GUI for the Autocomplete project.
+# Now supports: Folder / ZIP / .txt files (multi-select)
+# - Uses your Engine + build_index_fast
+# - Debounced search, background indexing, clean dark UI
 
-from __future__ import annotations
-import os
-import shutil
 import threading
+import tkinter as tk
 import zipfile
 import tempfile
+import shutil
 from pathlib import Path
-from typing import List, Optional
+from tkinter import filedialog, messagebox
 
-import tkinter.filedialog as fd
-import tkinter.messagebox as mb
 import customtkinter as ctk
 
-# Project imports (ensure PYTHONPATH=src)
-from src.autocomplete.engine import load_corpus, get_best_k_completions
+# --- Project imports (unchanged API) ---
+from src.autocomplete.engine import Engine, build_index_fast
 from src.autocomplete.models import AutoCompleteData
+from src.autocomplete.config import TOP_K
+from src.autocomplete import config as CFG  # we mutate DATA_ROOT, READ_MODE, WORKERS
 
-
-# -------------------- small helpers --------------------
-
-def shorten_path(p: str, max_chars: int = 60) -> str:
-    """Shorten long paths neatly for labels."""
-    if len(p) <= max_chars:
-        return p
-    keep = max_chars // 2 - 3
-    return p[:keep] + "..." + p[-keep:]
-
-
-def safe_extract_zip(zip_path: str, dest_dir: str) -> None:
-    """
-    Extract zip contents to dest_dir with basic zip-slip protection.
-    Only ensures members stay within dest_dir (no absolute paths / .. traversal).
-    """
-    dest_abs = os.path.abspath(dest_dir)
-    with zipfile.ZipFile(zip_path) as zf:
-        for info in zf.infolist():
-            # Normalize final target path
-            target = os.path.abspath(os.path.join(dest_abs, info.filename))
-            # Allow the dest root itself (for top-level dirs), otherwise require prefix
-            if target != dest_abs and not target.startswith(dest_abs + os.sep):
-                raise RuntimeError(f"Unsafe zip entry: {info.filename!r}")
-        # If all entries are safe, extract
-        zf.extractall(dest_abs)
-
-
-# -------------------- main app --------------------
 
 class AutocompleteApp(ctk.CTk):
-    """Dark-themed GUI that loads a corpus from folder or ZIP and queries the engine."""
+    """
+    Dark-themed CustomTkinter GUI that wraps the Engine-based Autocomplete project.
+
+    Supports three input modes:
+      1) Choose Corpus Folder
+      2) Choose ZIP Corpus  (extracted to a temp dir)
+      3) Choose .txt Files  (staged into a temp dir)
+
+    All modes set CFG.DATA_ROOT to a directory before calling build_index_fast(self.engine).
+    """
 
     def __init__(self) -> None:
         super().__init__()
 
-        # Theme
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
+        # ---- Global theme ----
+        ctk.set_appearance_mode("Dark")          # "Light" | "Dark" | "System"
+        ctk.set_default_color_theme("blue")      # "blue" | "green" | "dark-blue"
 
-        # Window
-        self.title("Autocomplete Engine")
-        self.geometry("900x650")
+        self.title("Autocomplete Engine – Dark UI")
+        self.geometry("900x640")
         self.minsize(820, 560)
 
-        # State
-        self._corpus_loaded: bool = False
-        self._loading_thread: Optional[threading.Thread] = None
-        self._search_after_id: Optional[str] = None
-        self._current_root_label: str = "No source selected"
-        self._tmpdir_path: Optional[str] = None  # holds extracted ZIP dir
+        # ---- App state ----
+        self.engine = Engine()
+        self._corpus_loaded = False
+        self._loading_thread: threading.Thread | None = None
+        self._search_after_id: str | None = None
+        self._temp_dirs: list[Path] = []  # track all temp dirs to clean up
+        self._k_var = tk.IntVar(value=TOP_K)
 
-        # Fonts
-        self.font_title = ctk.CTkFont(size=18, weight="bold")
-        self.font_label = ctk.CTkFont(size=13)
-        self.font_mono = ctk.CTkFont(family="Cascadia Mono, Menlo, Consolas, Courier New", size=13)
+        # ---- Build UI ----
+        self._build_widgets()
 
-        # Layout grid
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)  # results
-        self.grid_rowconfigure(5, weight=1)  # log
-
-        # Build UI
-        self._build_header()
-        self._build_source_bar()
-        self._build_search()
-        self._build_results()
-        self._build_log()
-
-        self._set_status("Ready")
+        # Quick shortcuts
+        self.bind("<Control-f>", lambda e: self.entry_query.focus_set())
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # --------- UI sections ---------
+    # ========================= UI =========================
+    def _build_widgets(self) -> None:
+        # Top bar: actions + status
+        top = ctk.CTkFrame(self, corner_radius=12, fg_color="transparent")
+        top.pack(side="top", fill="x", padx=12, pady=(12, 6))
 
-    def _build_header(self) -> None:
-        header = ctk.CTkFrame(self, corner_radius=10)
-        header.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
-        header.grid_columnconfigure(0, weight=1)
-
-        title = ctk.CTkLabel(header, text="Autocomplete Engine", font=self.font_title)
-        title.grid(row=0, column=0, sticky="w", padx=12, pady=10)
-
-    def _build_source_bar(self) -> None:
-        bar = ctk.CTkFrame(self, corner_radius=10)
-        bar.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
-        bar.grid_columnconfigure(1, weight=1)
-
-        # Choose folder
-        btn_folder = ctk.CTkButton(bar, text="Choose Folder", command=self._choose_folder)
-        btn_folder.grid(row=0, column=0, padx=(12, 6), pady=10)
-
-        # Choose ZIP
-        btn_zip = ctk.CTkButton(bar, text="Choose ZIP", command=self._choose_zip)
-        btn_zip.grid(row=0, column=1, padx=(0, 6), pady=10, sticky="w")
-
-        # Selected label
-        self.lbl_source = ctk.CTkLabel(bar, text=self._current_root_label, anchor="w", font=self.font_label)
-        self.lbl_source.grid(row=0, column=2, sticky="ew", padx=(6, 6), pady=10)
-
-        # Progress + status
-        self.progress = ctk.CTkProgressBar(bar, mode="indeterminate", determinate_speed=1.2)
-        self.progress.grid(row=0, column=3, sticky="e", padx=(0, 6), pady=10)
-
-        self.lbl_status = ctk.CTkLabel(bar, text="Status: —", anchor="e")
-        self.lbl_status.grid(row=0, column=4, sticky="e", padx=12, pady=10)
-
-    def _build_search(self) -> None:
-        box = ctk.CTkFrame(self, corner_radius=10)
-        box.grid(row=2, column=0, sticky="ew", padx=12, pady=(6, 6))
-        box.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(box, text="Enter text to search:", font=self.font_label).grid(
-            row=0, column=0, sticky="w", padx=12, pady=10
+        self.btn_pick_folder = ctk.CTkButton(
+            top, text="Choose Corpus Folder", command=self.on_pick_folder
         )
+        self.btn_pick_folder.pack(side="left", padx=(0, 8))
 
-        self.entry_query = ctk.CTkEntry(box, placeholder_text="Start typing a prefix…")
-        self.entry_query.grid(row=0, column=1, sticky="ew", padx=(6, 12), pady=10)
-        self.entry_query.bind("<KeyRelease>", self._on_query_changed)
-
-    def _build_results(self) -> None:
-        frame = ctk.CTkFrame(self, corner_radius=10)
-        frame.grid(row=3, column=0, sticky="nsew", padx=12, pady=(6, 6))
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(1, weight=1)
-
-        ctk.CTkLabel(frame, text="Results", font=self.font_label).grid(
-            row=0, column=0, sticky="w", padx=12, pady=(10, 2)
+        self.btn_pick_zip = ctk.CTkButton(
+            top, text="Choose ZIP Corpus", command=self.on_pick_zip
         )
+        self.btn_pick_zip.pack(side="left", padx=(0, 8))
 
-        inner = ctk.CTkFrame(frame, corner_radius=8)
-        inner.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
-        inner.grid_columnconfigure(0, weight=1)
-        inner.grid_rowconfigure(0, weight=1)
-
-        self.txt_results = ctk.CTkTextbox(inner, wrap="word", font=self.font_mono)
-        self.txt_results.grid(row=0, column=0, sticky="nsew")
-        self.txt_results.configure(state="disabled")
-        self._set_results("(no results yet — load a corpus and start typing)")
-
-    def _build_log(self) -> None:
-        frame = ctk.CTkFrame(self, corner_radius=10)
-        frame.grid(row=5, column=0, sticky="nsew", padx=12, pady=(6, 12))
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(1, weight=1)
-
-        ctk.CTkLabel(frame, text="Event log", font=self.font_label).grid(
-            row=0, column=0, sticky="w", padx=12, pady=(10, 2)
+        self.btn_pick_txts = ctk.CTkButton(
+            top, text="Choose .txt Files", command=self.on_pick_txts
         )
+        self.btn_pick_txts.pack(side="left", padx=(0, 8))
 
-        self.txt_log = ctk.CTkTextbox(frame, height=110, wrap="word", font=ctk.CTkFont(size=12))
-        self.txt_log.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
-        self._log("GUI ready. Choose a folder or ZIP to begin.")
+        self.btn_clear_log = ctk.CTkButton(
+            top, text="Clear Log", command=self._clear_log
+        )
+        self.btn_clear_log.pack(side="left", padx=(0, 8))
 
-    # --------- source selection ---------
+        self.lbl_folder = ctk.CTkLabel(
+            top, text="No source selected", anchor="w"
+        )
+        self.lbl_folder.pack(side="left", padx=8)
 
-    def _choose_folder(self) -> None:
-        path = fd.askdirectory(title="Choose corpus folder")
+        # Status line
+        self.lbl_status = ctk.CTkLabel(self, text="Status: Ready", anchor="w")
+        self.lbl_status.pack(side="top", fill="x", padx=14)
+
+        # Search area
+        search = ctk.CTkFrame(self, corner_radius=12)
+        search.pack(side="top", fill="x", padx=12, pady=8)
+
+        ctk.CTkLabel(search, text="Type to search:").pack(
+            side="top", anchor="w", padx=8, pady=(8, 0)
+        )
+        self.entry_query = ctk.CTkEntry(search, placeholder_text="Enter query…")
+        self.entry_query.pack(side="top", fill="x", padx=8, pady=(4, 10))
+        self.entry_query.bind("<KeyRelease>", self.on_query_changed)
+
+        # K (top-k) control
+        k_row = ctk.CTkFrame(search, fg_color="transparent")
+        k_row.pack(side="top", fill="x", padx=8, pady=(0, 10))
+        ctk.CTkLabel(k_row, text="Results (k):").pack(side="left")
+        self.k_slider = ctk.CTkSlider(
+            k_row, from_=1, to=50, number_of_steps=49,
+            command=lambda v: self._k_var.set(int(float(v)))
+        )
+        self.k_slider.set(TOP_K)
+        self.k_slider.pack(side="left", fill="x", expand=True, padx=10)
+        self.k_value = ctk.CTkLabel(k_row, text=str(TOP_K))
+        self.k_value.pack(side="left")
+        self._k_var.trace_add("write", lambda *_: self.k_value.configure(text=str(self._k_var.get())))
+
+        # Main split: results (top) + log (bottom)
+        main = ctk.CTkFrame(self, corner_radius=12)
+        main.pack(side="top", fill="both", expand=True, padx=12, pady=(0, 12))
+
+        # Results panel
+        results_frame = ctk.CTkFrame(main, corner_radius=12)
+        results_frame.pack(side="top", fill="both", expand=True, padx=8, pady=8)
+
+        ctk.CTkLabel(results_frame, text="Results").pack(
+            side="top", anchor="w", padx=10, pady=(8, 4)
+        )
+        self.txt_results = ctk.CTkTextbox(results_frame, height=250)
+        self.txt_results.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
+
+        res_scroll = ctk.CTkScrollbar(results_frame, command=self.txt_results.yview)
+        res_scroll.pack(side="right", fill="y", padx=(0, 10), pady=(0, 10))
+        self.txt_results.configure(yscrollcommand=res_scroll.set)
+
+        # Log panel
+        log_frame = ctk.CTkFrame(main, corner_radius=12)
+        log_frame.pack(side="bottom", fill="both", expand=False, padx=8, pady=(0, 8))
+
+        ctk.CTkLabel(log_frame, text="Log").pack(
+            side="top", anchor="w", padx=10, pady=(8, 4)
+        )
+        self.txt_log = ctk.CTkTextbox(log_frame, height=140)
+        self.txt_log.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=(0, 10))
+
+        log_scroll = ctk.CTkScrollbar(log_frame, command=self.txt_log.yview)
+        log_scroll.pack(side="right", fill="y", padx=(0, 10), pady=(0, 10))
+        self.txt_log.configure(yscrollcommand=log_scroll.set)
+
+        # Initial placeholder
+        self._set_results("(No results yet — load a corpus and start typing.)")
+
+    # =================== Events / Actions ===================
+    def on_pick_folder(self) -> None:
+        """Open a folder picker and kick off background corpus loading."""
+        path = filedialog.askdirectory(title="Choose Corpus Folder")
         if not path:
             return
-        self._start_loading(mode="folder", source=path)
+        self._prepare_new_corpus(Path(path), is_temp=False)
 
-    def _choose_zip(self) -> None:
-        path = fd.askopenfilename(
-            title="Choose corpus ZIP",
-            filetypes=[("ZIP archives", "*.zip"), ("All files", "*.*")]
+    def on_pick_zip(self) -> None:
+        """Open a ZIP picker, extract to a temp dir, and load."""
+        zip_path = filedialog.askopenfilename(
+            title="Choose ZIP Corpus",
+            filetypes=[("ZIP archives", "*.zip")]
         )
-        if not path:
+        if not zip_path:
             return
-        self._start_loading(mode="zip", source=path)
 
-    # --------- loading pipeline (threaded) ---------
+        try:
+            temp_dir = Path(tempfile.mkdtemp(prefix="autocomplete_corpus_"))
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(temp_dir)
+        except Exception as exc:
+            messagebox.showerror("Error", f"Failed to extract ZIP:\n{exc}")
+            return
 
-    def _start_loading(self, mode: str, source: str) -> None:
-        # prevent re-entrancy
+        self._temp_dirs.append(temp_dir)
+        self._prepare_new_corpus(temp_dir, is_temp=True)
+
+    def on_pick_txts(self) -> None:
+        """Select one or more .txt files; stage them into a temp dir and load."""
+        files = filedialog.askopenfilenames(
+            title="Choose .txt Files",
+            filetypes=[("Text files", "*.txt")]
+        )
+        if not files:
+            return
+
+        try:
+            staged_dir = self._stage_txt_files_to_temp(files)
+        except Exception as exc:
+            messagebox.showerror("Error", f"Failed to stage .txt files:\n{exc}")
+            return
+
+        self._temp_dirs.append(staged_dir)
+        self._prepare_new_corpus(staged_dir, is_temp=True)
+
+    def _stage_txt_files_to_temp(self, file_paths: tuple[str] | list[str]) -> Path:
+        """
+        Copy selected .txt files into a new temp directory so that build_index_fast,
+        which expects a directory root, can index them uniformly.
+        """
+        temp_dir = Path(tempfile.mkdtemp(prefix="autocomplete_txts_"))
+        used_names: set[str] = set()
+
+        for raw in file_paths:
+            src = Path(raw)
+            if src.suffix.lower() != ".txt":
+                # Skip non-txt (shouldn't happen due to filter, but be safe)
+                continue
+
+            name = src.name
+            stem, suffix = src.stem, src.suffix
+            # Ensure unique names to avoid collisions
+            i = 1
+            while name in used_names or (temp_dir / name).exists():
+                name = f"{stem}_{i}{suffix}"
+                i += 1
+            used_names.add(name)
+
+            shutil.copy2(src, temp_dir / name)
+
+        if not any(temp_dir.iterdir()):
+            # Nothing copied -> user picked invalid files or cancellation
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise ValueError("No .txt files were staged.")
+
+        return temp_dir
+
+    def _prepare_new_corpus(self, root: Path, is_temp: bool) -> None:
+        """Reset engine state and start a background indexing run."""
+        self.lbl_folder.configure(
+            text=f"{'Temp ' if is_temp else ''}Source: {root}"
+        )
+        self.engine = Engine()  # reset engine
         if self._loading_thread and self._loading_thread.is_alive():
-            mb.showinfo("Loading", "A corpus is already loading. Please wait.")
+            messagebox.showinfo("Loading", "A load is already in progress. Please wait.")
             return
 
-        # clean previous temp (if any)
-        self._cleanup_tmpdir()
-
-        # UI
-        tag = "ZIP" if mode == "zip" else "Folder"
-        self._current_root_label = f"{tag}: {shorten_path(source)}"
-        self.lbl_source.configure(text=self._current_root_label)
-        self._set_status(f"Loading from {tag.lower()}…")
-        self.progress.start()
+        self._log(f"Starting corpus load from: {root}")
+        self._set_status(f"Loading corpus from: {root}")
         self._corpus_loaded = False
+        self._set_inputs_enabled(False)
 
-        # Launch worker
         self._loading_thread = threading.Thread(
-            target=self._load_worker, args=(mode, source), daemon=True
+            target=self._load_corpus_worker,
+            args=(str(root),),
+            daemon=True,
         )
         self._loading_thread.start()
 
-    def _load_worker(self, mode: str, source: str) -> None:
+    def _load_corpus_worker(self, path_str: str) -> None:
+        """Background thread: set config + build the index into self.engine."""
         try:
-            roots: List[str]
-            if mode == "zip":
-                self._log(f"Extracting ZIP: {source}")
-                tmpdir = tempfile.mkdtemp(prefix="autocomplete_corpus_")
-                try:
-                    safe_extract_zip(source, tmpdir)
-                except Exception:
-                    # cleanup on extraction error
-                    shutil.rmtree(tmpdir, ignore_errors=True)
-                    raise
-                self._tmpdir_path = tmpdir  # keep until next load/exit
-                roots = [tmpdir]
-            else:
-                roots = [source]
+            CFG.DATA_ROOT = Path(path_str)
+            CFG.READ_MODE = "threads"
+            CFG.WORKERS = 16
 
-            corpus = load_corpus(roots)
-            n = len(corpus.sentences)
+            build_index_fast(self.engine)
+            n = len(self.engine.corpus.sentences)
         except Exception as exc:
-            self.after(0, lambda: self._on_load_error(exc))
+            self._log(f"ERROR loading corpus: {exc!r}")
+            self.after(0, lambda: self._set_status("Error: failed to load corpus."))
+            self.after(0, lambda: messagebox.showerror("Error", f"Failed to load corpus:\n{exc}"))
+            self.after(0, lambda: self._set_inputs_enabled(True))
             return
 
-        self.after(0, lambda: self._on_load_ok(n))
+        self.after(0, lambda: self._on_corpus_loaded(n))
 
-    def _on_load_ok(self, n_sentences: int) -> None:
-        self.progress.stop()
+    def _on_corpus_loaded(self, n_sentences: int) -> None:
         self._corpus_loaded = True
         self._set_status(f"Loaded {n_sentences:,} sentences.")
-        self._log(f"Corpus ready ({n_sentences} sentences).")
+        self._log(f"Corpus loaded: {n_sentences} sentences.")
+        self._set_inputs_enabled(True)
         self.entry_query.focus_set()
 
-    def _on_load_error(self, exc: Exception) -> None:
-        self.progress.stop()
-        self._set_status("Error while loading corpus.")
-        self._log(f"ERROR: {exc!r}")
-        mb.showerror("Load error", "Failed to load corpus.\nSee event log for details.")
-
-    # --------- search ---------
-
-    def _on_query_changed(self, _ev=None) -> None:
-        # debounce for smoother typing
+    def on_query_changed(self, event=None) -> None:
+        """Debounce key events and trigger search."""
         if self._search_after_id is not None:
-            try:
-                self.after_cancel(self._search_after_id)
-            except Exception:
-                pass
-        self._search_after_id = self.after(160, self._do_search)
+            self.after_cancel(self._search_after_id)
+        self._search_after_id = self.after(150, self._do_search)
 
     def _do_search(self) -> None:
         q = self.entry_query.get()
         if not q.strip():
             self._set_results("")
             return
+
         if not self._corpus_loaded:
-            self._set_results("error: please load a corpus before searching.")
+            self._set_results("Error: please load a corpus before searching.")
             self._log("Search attempted before corpus load.")
             return
 
-        self._log("Calling get_best_k_completions…")
+        k = int(self._k_var.get())
+        self._log(f"engine.query('{q}', k={k})...")
         try:
-            results = get_best_k_completions(q)
+            results = self.engine.query(q, k=k)
         except Exception as exc:
-            self._set_results(f"error while searching: {exc}")
+            self._set_results(f"Search error: {exc}")
             self._log(f"ERROR in search: {exc!r}")
             return
 
         if not results:
-            self._set_results("(no results yet; waiting for search implementation)")
+            self._set_results("No matches found.")
             return
 
-        lines = [self._fmt(r) for r in results]
+        lines = [self._format_result(r) for r in results]
         self._set_results("\n".join(lines))
 
+    # =================== Utilities ===================
     @staticmethod
-    def _fmt(r: AutoCompleteData) -> str:
-        return f"score: {r.score:<4} | file: {r.source_text}:{r.offset} | {r.completed_sentence}"
-
-    # --------- misc UI helpers ---------
+    def _format_result(r: AutoCompleteData) -> str:
+        source_display = str(r.source_text)
+        return f"score={r.score} | {source_display}:{r.offset} | {r.completed_sentence}"
 
     def _set_status(self, text: str) -> None:
         self.lbl_status.configure(text=f"Status: {text}")
 
     def _set_results(self, text: str) -> None:
         self.txt_results.configure(state="normal")
-        self.txt_results.delete("0.0", "end")
+        self.txt_results.delete("1.0", "end")
         if text:
-            self.txt_results.insert("end", text)
+            self.txt_results.insert("1.0", text)
         self.txt_results.configure(state="disabled")
 
     def _log(self, msg: str) -> None:
-        self.txt_log.insert("end", msg + "\n")
+        self.txt_log.configure(state="normal")
+        self.txt_log.insert("end", f"{msg}\n")
         self.txt_log.see("end")
+        self.txt_log.configure(state="disabled")
 
-    # --------- lifecycle ---------
+    def _clear_log(self) -> None:
+        self.txt_log.configure(state="normal")
+        self.txt_log.delete("1.0", "end")
+        self.txt_log.configure(state="disabled")
 
-    def _cleanup_tmpdir(self) -> None:
-        if self._tmpdir_path and os.path.isdir(self._tmpdir_path):
-            try:
-                shutil.rmtree(self._tmpdir_path, ignore_errors=True)
-            finally:
-                self._tmpdir_path = None
+    def _set_inputs_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        self.btn_pick_folder.configure(state=state)
+        self.btn_pick_zip.configure(state=state)
+        self.btn_pick_txts.configure(state=state)
+        self.btn_clear_log.configure(state=state)
+        self.entry_query.configure(state=state)
+        self.k_slider.configure(state=state)
 
     def _on_close(self) -> None:
-        self._cleanup_tmpdir()
+        # Best-effort cleanup of all temp directories
+        for d in self._temp_dirs:
+            try:
+                shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
         self.destroy()
 
 
