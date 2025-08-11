@@ -1,4 +1,3 @@
 .venv
-auto_complete/src/Archive
-
-students_materials/
+auto_complete/Archive/
+auto_complete/src/__pycache__/
