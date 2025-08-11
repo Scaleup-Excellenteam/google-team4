@@ -1,12 +1,12 @@
 """Public API for the autocomplete engine (fast-start ready)."""
 from __future__ import annotations
 import os, time
-from .config import TOP_K
-from .loader import load_corpus
-from .index import KGramIndex
-from .search import complete_query
-from .storage import save_index, load_index, save_acx_from_bst, load_acx
-from .corpusdb import CorpusDB
+from .backend.config import TOP_K
+from .backend.loader import load_corpus
+from .DataBase.index import KGramIndex
+from .backend.search import complete_query
+from .DataBase.storage import save_index, load_index, save_acx_from_bst, load_acx
+from .DataBase.corpusdb import CorpusDB
 
 _index: KGramIndex | None = None
 

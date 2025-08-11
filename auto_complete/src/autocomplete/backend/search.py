@@ -1,21 +1,29 @@
 from __future__ import annotations
 from typing import Optional, List
-from .models import AutoCompleteData, Sentence
-from .normalize import normalize_only
-from .index import KGramIndex
-from .config import TOP_K
+from .backend.models import AutoCompleteData, Sentence
+from .backend.normalize import normalize_only
+from .DataBase.index import KGramIndex
+from .backend.config import TOP_K
 
 # Penalty tables by 1-based position
 _REPLACE = {1: 5, 2: 4, 3: 3, 4: 2}
 _INSERT_DEL = {1: 10, 2: 8, 3: 6, 4: 4}
 
+
+# Penalty functions for 1-based positions
+
 def _replace_penalty(pos1: int) -> int:
+    """Penalty for a replacement at 1-based position pos1."""
+    """Returns a negative penalty value."""
     return -(_REPLACE.get(pos1, 1))
 
 def _insdel_penalty(pos1: int) -> int:
+    """Penalty for an insertion or deletion at 1-based position pos1."""
+    """Returns a negative penalty value."""
     return -(_INSERT_DEL.get(pos1, 2))
 
 def _hamming_one(q: str, t: str) -> Optional[int]:
+    """Returns the 1-based position of the differing character, or None if not exactly one."""
     assert len(q) == len(t)
     diff_pos = 0
     for i, (a, b) in enumerate(zip(q, t), start=1):
@@ -26,6 +34,7 @@ def _hamming_one(q: str, t: str) -> Optional[int]:
     return diff_pos or None
 
 def _one_added_in_query(q: str, t: str) -> Optional[int]:
+    """Returns the 1-based position in query where an extra letter was added, or None if not exactly one."""
     assert len(q) == len(t) + 1
     i = j = 0
     extra_pos: Optional[int] = None
@@ -43,6 +52,7 @@ def _one_added_in_query(q: str, t: str) -> Optional[int]:
     return extra_pos
 
 def _one_missing_in_query(q: str, t: str) -> Optional[int]:
+    """Returns the 1-based position in query where a letter is missing, or None if not exactly one."""
     assert len(q) + 1 == len(t)
     i = j = 0
     gap_pos: Optional[int] = None
@@ -59,6 +69,14 @@ def _one_missing_in_query(q: str, t: str) -> Optional[int]:
         gap_pos = len(q) + 1
     return gap_pos
 
+"""
+TODO: 
+    - penalties for 2+ edits
+"""
+
+
+# Complete the query against the index, returning top-k results.
+
 def _line_col_from_concat(orig: str, pos: int, base_line: int) -> tuple[int, int]:
     """Convert a char index in a multi-line 'original' block to (line_no, col)."""
     # Count newlines before pos
@@ -69,6 +87,7 @@ def _line_col_from_concat(orig: str, pos: int, base_line: int) -> tuple[int, int
     return (base_line + line_add, col)
 
 def _choose_better(cur: Optional[tuple], cand: tuple) -> tuple:
+    """Choose the better candidate based on score and position."""
     if cur is None:
         return cand
     if cand[0] > cur[0]:
@@ -78,6 +97,7 @@ def _choose_better(cur: Optional[tuple], cand: tuple) -> tuple:
     return cur
 
 def _best_match_in_sentence(s: Sentence, q_norm: str) -> Optional[tuple[int, int, int]]:
+    """Find the best match for q_norm in the sentence s."""
     s_norm = s.normalized
     if not q_norm or not s_norm:
         return None
@@ -130,6 +150,7 @@ def _best_match_in_sentence(s: Sentence, q_norm: str) -> Optional[tuple[int, int
     return (best[0], best[1], best[2])
 
 def complete_query(query: str, index: KGramIndex, top_k: int = TOP_K) -> List[AutoCompleteData]:
+    """Complete the query against the index, returning top-k results."""
     q_norm = normalize_only(query)
     candidates = index.candidate_ids(q_norm)
 

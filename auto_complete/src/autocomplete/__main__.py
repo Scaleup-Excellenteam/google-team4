@@ -1,7 +1,7 @@
 from __future__ import annotations
 import argparse, os, sys
 from . import initialize, complete
-from .normalize import normalize_only
+from .backend.normalize import normalize_only
 
 def _supports_color() -> bool:
     return sys.stdout.isatty() and os.environ.get("NO_COLOR", "") == ""
@@ -27,6 +27,8 @@ def _print_table(rows):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Autocomplete REPL (fast-start, multi-line aware)")
+
+    # flags and options 
     parser.add_argument("--roots", nargs="+", default=[], help="Roots (required when rebuilding)")
     parser.add_argument("--cache", default=None)
     parser.add_argument("--acx", default=None)
@@ -52,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Type a prefix and press Enter (empty to quit).  Type '#' to reset the buffer.  [{mode} mode]")
     print(_c("Commands: :echo on|off, :clear, :reset", "2;37"))
 
+
+    # CLI loop
     buffer = ""
     while True:
         try:

@@ -2,10 +2,10 @@ from __future__ import annotations
 import os
 from collections import Counter, defaultdict
 from typing import Set, Iterable, List, Tuple, Dict, Callable
-from .bst import BST
-from .models import Corpus, Sentence
-from .normalize import kgrams
-from .config import GRAM, MAX_CANDIDATES
+from ..bst import BST
+from ..models import Corpus, Sentence
+from ..normalize import kgrams
+from ..config import GRAM, MAX_CANDIDATES
 
 VERBOSE = os.environ.get("AUTOCOMPLETE_VERBOSE") == "1"
 
