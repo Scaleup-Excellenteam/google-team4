@@ -1,98 +1,75 @@
 from __future__ import annotations
-import argparse, os, sys
-from . import initialize, complete
-from .backend.normalize import normalize_only
-
-def _supports_color() -> bool:
-    return sys.stdout.isatty() and os.environ.get("NO_COLOR", "") == ""
-
-CSI = "\033["
-def _c(text: str, code: str) -> str:
-    if not _supports_color(): return text
-    return f"{CSI}{code}m{text}{CSI}0m"
-
-def _clear_screen():
-    # ANSI clear; fallback to newlines if not a TTY
-    if sys.stdout.isatty():
-        print("\033[2J\033[H", end="", flush=True)
-    else:
-        print("\n" * 100)
-
-def _print_table(rows):
-    if not rows:
-        print(_c("(no matches)", "2;37")); return
-    print(_c("#  Score  Offset   Source                               Sentence", "1;37"))
-    for r in rows:
-        print(f"{r['rank']:<2} {r['score']:<6} {r['offset']:<9} {r['source']:<36} {r['sentence']}")
+import argparse, os, sys, json
+from backend import Engine
+from backend.config import TOP_K
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Autocomplete REPL (fast-start, multi-line aware)")
+    p = argparse.ArgumentParser(description="Autocomplete CLI (Engine-backed)")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--build", action="store_true", help="Build index from --roots")
+    g.add_argument("--load", action="store_true", help="Load existing index/db")
 
-    # flags and options 
-    parser.add_argument("--roots", nargs="+", default=[], help="Roots (required when rebuilding)")
-    parser.add_argument("--cache", default=None)
-    parser.add_argument("--acx", default=None)
-    parser.add_argument("--db", default=None)
-    parser.add_argument("--rebuild", action="store_true")
-    parser.add_argument("--verbose", action="store_true")
-    parser.add_argument("--single-line", action="store_true")
-    parser.add_argument("--unit", choices=["line","paragraph","window"], default=None)
-    parser.add_argument("--window-size", type=int, default=None)
-    parser.add_argument("--window-step", type=int, default=None)
-    parser.add_argument("--echo", action="store_true", help="Echo normalized query as [query] '...'")
-    args = parser.parse_args(argv)
+    p.add_argument("--roots", nargs="+", default=[], help="Folders to scan for .txt")
+    p.add_argument("--cache", default=None, help="Pickle path for index (legacy cache)")
+    p.add_argument("--db", default=None, help="SQLite path for corpus")
+    p.add_argument("--acx", default=None, help="ACX path (optional fast index)")
+    p.add_argument("-k", type=int, default=TOP_K, help="Top-K results")
+    p.add_argument("--repl", action="store_true", help="Interactive loop after init")
+    p.add_argument("--q", default=None, help="Single query to run once")
+    p.add_argument("--unit", choices=["line","paragraph","window"], help="Text unit")
+    p.add_argument("--window-size", type=int, default=None)
+    p.add_argument("--window-step", type=int, default=None)
+    p.add_argument("--json", action="store_true", help="Emit JSON rows")
+    p.add_argument("--verbose", action="store_true")
 
-    if args.verbose:
-        os.environ["AUTOCOMPLETE_VERBOSE"] = "1"
+    args = p.parse_args(argv)
 
-    initialize(args.roots, cache=args.cache, rebuild=args.rebuild, verbose=args.verbose,
-               acx=args.acx, db=args.db, unit=args.unit,
-               window_size=args.window_size, window_step=args.window_step)
+    eng = Engine()
+    try:
+        if args.build:
+            if not args.roots:
+                p.error("--build requires --roots")
+            eng.build(
+                roots=args.roots,
+                cache=args.cache,
+                db_dsn=args.db,
+                unit=args.unit,
+                window_size=args.window_size,
+                window_step=args.window_step,
+                verbose=args.verbose,
+            )
+        else:
+            eng.load(cache=args.cache, db_dsn=args.db, acx=args.acx, verbose=args.verbose)
 
-    echo = args.echo
-    mode = "single-line" if args.single_line else "incremental"
-    print(f"Type a prefix and press Enter (empty to quit).  Type '#' to reset the buffer.  [{mode} mode]")
-    print(_c("Commands: :echo on|off, :clear, :reset", "2;37"))
+        def run_query(q: str):
+            rows = eng.complete(q, top_k=args.k)
+            if args.json:
+                print(json.dumps([r.__dict__ for r in rows], ensure_ascii=False, indent=2))
+            else:
+                if not rows:
+                    print("(no matches)"); return
+                print("#  Score  Offset   Source                               Sentence")
+                for i, r in enumerate(rows, 1):
+                    off = f"({r.offset[0]},{r.offset[1]})"
+                    print(f"{i:<2} {r.score:<6} {off:<9} {r.source_text:<36} {r.completed_sentence}")
 
+        if args.q:
+            run_query(args.q)
 
-    # CLI loop
-    buffer = ""
-    while True:
-        try:
-            raw = input("> ")
-        except EOFError:
-            print(); break
-        cmd = raw.strip().lower()
-        if raw == "":
-            print("Goodbye!"); break
-        if cmd == "#":
-            buffer = ""; print(_c("(reset)", "2;36")); continue
-        if cmd == ":reset":
-            buffer = ""; print(_c("(reset)", "2;36")); continue
-        if cmd in (":clear", ":cls"):
-            _clear_screen(); continue
-        if cmd == ":echo on":
-            echo = True; print(_c("(echo on)", "2;36")); continue
-        if cmd == ":echo off":
-            echo = False; print(_c("(echo off)", "2;36")); continue
+        if args.repl:
+            print("Type a query (empty line to exit).")
+            while True:
+                try:
+                    q = input("> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    break
+                if not q:
+                    break
+                run_query(q)
 
-        query = raw if args.single_line else (buffer + raw)
-        if not args.single_line:
-            buffer = query
-        if echo:
-            print(f"[query] {normalize_only(query)!r}")
-
-        hits = complete(query)
-        rows = []
-        for i, h in enumerate(hits, start=1):
-            rows.append({
-                "rank": i, "score": h.score,
-                "offset": f"({h.offset[0]},{h.offset[1]})",
-                "source": (h.source_text[:34] + "..") if len(h.source_text) > 36 else h.source_text,
-                "sentence": h.completed_sentence
-            })
-        _print_table(rows)
-    return 0
+        return 0
+    finally:
+        eng.shutdown()
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

@@ -1,9 +1,9 @@
 from __future__ import annotations
 from typing import Optional, List
-from .backend.models import AutoCompleteData, Sentence
-from .backend.normalize import normalize_only
-from .DataBase.index import KGramIndex
-from .backend.config import TOP_K
+from .models import AutoCompleteData, Sentence
+from .normalize import normalize_only
+from .DB.index import KGramIndex
+from .config import TOP_K
 
 # Penalty tables by 1-based position
 _REPLACE = {1: 5, 2: 4, 3: 3, 4: 2}

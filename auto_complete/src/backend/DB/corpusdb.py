@@ -2,7 +2,7 @@ from __future__ import annotations
 import sqlite3
 from array import array
 from typing import Iterable, Iterator
-from ..backend.models import Sentence, Corpus
+from ..models import Sentence, Corpus
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sentences (

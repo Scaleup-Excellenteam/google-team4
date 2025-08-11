@@ -2,8 +2,8 @@ from __future__ import annotations
 import os
 from typing import Iterable, List
 from .models import Sentence, Corpus
-from .backend.normalize import normalize_and_map
-from .backend.config import TEXT_UNIT, WINDOW_SIZE, WINDOW_STEP
+from .normalize import normalize_and_map
+from .config import TEXT_UNIT, WINDOW_SIZE, WINDOW_STEP
 
 # Progress logging (set AUTOCOMPLETE_VERBOSE=1 to enable)
 VERBOSE = os.environ.get("AUTOCOMPLETE_VERBOSE") == "1"

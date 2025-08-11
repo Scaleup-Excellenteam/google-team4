@@ -2,10 +2,10 @@ from __future__ import annotations
 import os
 from collections import Counter, defaultdict
 from typing import Set, Iterable, List, Tuple, Dict, Callable
-from ..backend.bst import BST
-from ..backend.models import Corpus, Sentence
-from ..backend.normalize import kgrams
-from ..backend.config import GRAM, MAX_CANDIDATES
+from ..bst import BST
+from ..models import Corpus, Sentence
+from ..normalize import kgrams
+from ..config import GRAM, MAX_CANDIDATES
 
 VERBOSE = os.environ.get("AUTOCOMPLETE_VERBOSE") == "1"
 
@@ -79,3 +79,17 @@ class KGramIndex:
         assert self._get_sentence is not None
         for sid in ids:
             yield self._get_sentence(int(sid))
+
+    # ---- Getters ----
+    def __getstate__(self):
+        # Make the object picklable by dropping the unpicklable lambda/closure.
+        state = self.__dict__.copy()
+        state["_get_sentence"] = None
+        # keep _num_sentences as a plain int
+        state["_num_sentences"] = int(state.get("_num_sentences", 0))
+        return state
+
+    # ---- Setters ----
+    def __setstate__(self, state):
+        # Loader will re-attach a real getter via attach_corpus()
+        self.__dict__.update(state)
