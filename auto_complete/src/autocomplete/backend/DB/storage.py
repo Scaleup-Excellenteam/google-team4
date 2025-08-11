@@ -3,7 +3,7 @@ import os
 import pickle
 from typing import Any, Iterable, Tuple
 from .DataBase.acx import ACXWriter, ACXIndex
-from ..config import GRAM
+from ..backend.config import GRAM
 
 def save_index(index: Any, path: str) -> None:
     """Pickle (legacy)."""
