@@ -15,19 +15,6 @@
 ├── frontend
 │   ├── __init__.py
 │   └── __main__.py
-├── __pycache__
-│   ├── acx.cpython-313.pyc
-│   ├── bst.cpython-313.pyc
-│   ├── config.cpython-313.pyc
-│   ├── corpusdb.cpython-313.pyc
-│   ├── index.cpython-313.pyc
-│   ├── __init__.cpython-313.pyc
-│   ├── loader.cpython-313.pyc
-│   ├── __main__.cpython-313.pyc
-│   ├── models.cpython-313.pyc
-│   ├── normalize.cpython-313.pyc
-│   ├── search.cpython-313.pyc
-│   └── storage.cpython-313.pyc
 └── tree.txt
 
-6 directories, 25 files
+5 directories, 13 files
