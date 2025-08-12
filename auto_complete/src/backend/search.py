@@ -15,6 +15,17 @@ _KEEP = re.compile(r"[a-z ]")
 
 _WORD = r"\w+"
 
+def _matched_word_at(norm_text: str, start: int) -> str:
+    """
+    Given a normalized string and a start index of a regex match,
+    return the full \w+ word that begins at 'start'.
+    If no word at start, return "".
+    """
+    m = re.match(_WORD, norm_text[start:])
+    return m.group(0) if m else ""
+
+
+
 # Penalty tables by 1-based position
 _REPLACE = {1: 5, 2: 4, 3: 3, 4: 2}
 _INSERT_DEL = {1: 10, 2: 8, 3: 6, 4: 4}
@@ -410,26 +421,98 @@ def complete_query(query: str, index, top_k: int):
     max_terms = getattr(CFG, "MAX_PREFIX_TERMS", 5000)
     max_cands = getattr(CFG, "MAX_PREFIX_CANDIDATES", 20000)
 
+    # 0) Augment & normalize
     aug = augment_query(query, index)
     q_corr = aug["corrected"]
     trailing_space = aug["trailing_space"]
 
     q_corr_norm = normalize_only(q_corr)
-    pat = _compile_prefix_pattern(q_corr_norm, trailing_space)
-    cand_sids = index.candidates_for_prefix_query(q_corr_norm, max_terms, max_cands)
+    toks = re.findall(_WORD, q_corr_norm)
 
-    # safety fallback if we corrected something but got no cands
+    # 1) Build regex from the *corrected* normalized query
+    pat = _compile_prefix_pattern(q_corr_norm, trailing_space)
+
+    # 2) Candidate SIDs from the *corrected* normalized query
+    if not trailing_space and len(toks) == 1 and hasattr(index, "candidates_for_term_prefix"):
+        cand_sids = index.candidates_for_term_prefix(toks[0], max_terms, max_cands)
+    else:
+        cand_sids = index.candidates_for_prefix_query(q_corr_norm, max_terms, max_cands)
+
+    # Safety fallback: if we corrected something but got no candidates, scan all
     if not cand_sids and q_corr_norm != normalize_only(query):
         cand_sids = range(getattr(index, "_num_sentences", 0))
+
+    _ONLY_WORDCHARS = re.compile(r"^[A-Za-z0-9_]+$")
+
+    def _matched_word_at(norm_text: str, start: int) -> tuple[str, int, int]:
+        """Return (word, s, e) for the \w+ word that begins at 'start' in norm_text; else ("", start, start)."""
+        m0 = re.match(_WORD, norm_text[start:])
+        if not m0:
+            return "", start, start
+        s = start
+        e = start + m0.end()
+        return m0.group(0), s, e
+
+    def _orig_span_from_norm(sentence, n_s: int, n_e: int) -> tuple[int, int]:
+        """Map normalized [n_s, n_e) to original [o_s, o_e)."""
+        # Guard against bounds; norm_to_orig length equals len(sentence.normalized)
+        nto = sentence.norm_to_orig
+        if n_s >= len(nto):
+            o_s = len(sentence.original)
+        else:
+            o_s = nto[n_s]
+        if n_e <= 0:
+            o_e = 0
+        else:
+            last = min(n_e - 1, len(nto) - 1)
+            o_e = nto[last] + 1
+        return o_s, o_e
 
     rows = []
     for s in index.iter_sentences(cand_sids):
         m = pat.search(s.normalized)
-        if not m: continue
+        if not m:
+            continue
         start, end = m.span()
+
+        # STRICT PREFIX GUARD: ensure we didn't match across punctuation in the ORIGINAL text
+        if toks:
+            if trailing_space:
+                # pattern already requires a following word; guard focuses on that word
+                # find the first next word beginning inside the match window
+                sub = s.normalized[start:end]
+                m2 = re.search(r"\b(\w+)", sub)
+                if not m2:
+                    continue
+                w_s = start + m2.start(1)
+                w_e = start + m2.end(1)
+            else:
+                if len(toks) == 1:
+                    # Single-token query: word starts at 'start'
+                    _, w_s, w_e = _matched_word_at(s.normalized, start)
+                else:
+                    # Multi-token: last token is the prefix somewhere within [start:end)
+                    pfx = toks[-1]
+                    sub = s.normalized[start:end]
+                    m2 = re.search(rf"\b{re.escape(pfx)}\w*", sub)
+                    if not m2:
+                        continue
+                    w_s = start + m2.start()
+                    w_e = start + m2.end()
+
+            # Map that matched word span back to the ORIGINAL text and require only word chars
+            o_s, o_e = _orig_span_from_norm(s, w_s, w_e)
+            orig_chunk = s.original[o_s:o_e]
+            if not _ONLY_WORDCHARS.match(orig_chunk):
+                # The normalized word is spanning punctuation in the original (e.g., "foo/bar", "<foo>bar")
+                continue
+
+        # Score vs ORIGINAL (so typo penalties apply)
         target_raw = s.original[start:end]
-        sc = score_prefix_1edit(query, target_raw)  # score vs ORIGINAL
-        if sc is None: continue
+        sc = score_prefix_1edit(query, target_raw)
+        if sc is None:
+            continue
+
         rows.append({
             "score": int(sc),
             "offset": [int(start), int(end)],
@@ -438,6 +521,6 @@ def complete_query(query: str, index, top_k: int):
             "query_original": query,
             "query_corrected": q_corr,
         })
+
     rows.sort(key=lambda r: r["score"], reverse=True)
     return rows[:top_k]
-
