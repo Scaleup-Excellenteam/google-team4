@@ -44,6 +44,7 @@ class KGramIndex:
 
         # Build word prefix index
         self._build_word_prefix_index(corpus)
+        
 
     # ---- Corpus provider ----
     def attach_corpus(self, getter: Callable[[int], Sentence], n: int) -> None:

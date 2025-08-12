@@ -18,6 +18,7 @@
 │   ├── normalize.py
 │   └── search.py
 ├── e2e
+│   ├── test_augment_query.py
 │   ├── test_frontend_complete_api_json.py
 │   ├── test_frontend_health_or_fallback.py
 │   ├── test_frontend_home_page_renders.py
@@ -34,4 +35,4 @@
 │   └── web.py
 └── tree.txt
 
-5 directories, 30 files
+5 directories, 31 files

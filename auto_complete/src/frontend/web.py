@@ -16,6 +16,7 @@ def api_complete():
         return jsonify([])
     rows = _engine.complete(q, top_k=k)  # type: ignore
     return jsonify(rows)
+
 # ---------- UI ----------
 @app.get("/")
 def home():
@@ -89,6 +90,18 @@ h1{
   display:none; margin-top:12px; padding:10px 12px; border-radius:10px;
   background:rgba(255,93,93,.12); border:1px solid rgba(255,93,93,.35); color:#ffb0b0;
 }
+/* NEW: Did-you-mean banner */
+.suggest{
+  display:none; margin-top:12px; padding:10px 12px; border-radius:10px;
+  background:rgba(34,211,238,.12); border:1px solid rgba(34,211,238,.35);
+  color:var(--ink);
+}
+.suggest .action{
+  border:none; background:none; color:var(--accent); cursor:pointer;
+  text-decoration:underline; padding:0; font:inherit;
+}
+.suggest .muted{ color: var(--muted); font-size: 13px; margin-left: 8px; }
+
 .results{
   margin-top:16px; overflow:clip; border-radius:12px; border:1px solid var(--border);
 }
@@ -134,6 +147,10 @@ kbd{ background:#111825; border:1px solid var(--border); padding:1px 6px; border
         <div id="stats">Ready.</div>
         <div>Tip: Press <kbd>Esc</kbd> to clear.</div>
       </div>
+
+      <!-- NEW: Did you mean banner -->
+      <div id="suggest" class="suggest" role="status" aria-live="polite"></div>
+
       <div id="err" class="err"></div>
       <div class="results">
         <div class="row head">
@@ -150,6 +167,7 @@ kbd{ background:#111825; border:1px solid var(--border); padding:1px 6px; border
 <script>
 const $ = (sel) => document.querySelector(sel);
 const q = $("#q"), out = $("#out"), err = $("#err"), stats = $("#stats"), spin = $("#spin"), k = $("#k"), clearBtn = $("#clear");
+const suggest = $("#suggest"); // NEW
 
 let t; // debounce timer
 function escapeRegExp(s){return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}
@@ -162,6 +180,31 @@ function highlight(text, query){
 }
 function fmtOffset(off){ return Array.isArray(off) && off.length===2 ? `(${off[0]},${off[1]})` : "—"; }
 
+// NEW: suggest banner helpers
+function hideSuggest(){
+  suggest.style.display = "none";
+  suggest.innerHTML = "";
+}
+function showSuggest(original, corrected){
+  if(!original || !corrected || original === corrected){
+    hideSuggest(); return;
+  }
+  suggest.innerHTML = `
+    Did you mean
+    <button id="useCorrected" class="action" type="button">${corrected}</button>
+    <span class="muted">(auto-corrected from “${original}”)</span>
+  `;
+  suggest.style.display = "block";
+  const btn = document.getElementById("useCorrected");
+  if(btn){
+    btn.addEventListener("click", ()=>{
+      q.value = corrected;
+      q.focus();
+      search();
+    });
+  }
+}
+
 async function search(){
   const query = q.value.trimStart(); // keep trailing spaces if the engine cares
   const topk = Math.max(1, Math.min(50, parseInt(k.value || "10", 10)));
@@ -170,6 +213,7 @@ async function search(){
     out.innerHTML = "Start typing to see results.";
     stats.textContent = "Ready.";
     err.style.display = "none";
+    hideSuggest(); // NEW
     return;
   }
   spin.style.display = "inline-block";
@@ -184,6 +228,7 @@ async function search(){
     if(!Array.isArray(data) || data.length === 0){
       out.className = "empty";
       out.innerHTML = "No matches.";
+      hideSuggest(); // NEW
       return;
     }
     out.className = "";
@@ -199,10 +244,16 @@ async function search(){
           <div${src}>${display}</div>
         </div>`;
     }).join("");
+
+    // NEW: show did-you-mean if backend corrected the query
+    const r0 = data[0] || {};
+    showSuggest(r0.query_original || "", r0.query_corrected || "");
+
   }catch(e){
     err.style.display = "block";
     err.textContent = `Error: ${e.message ?? e}`;
     stats.textContent = "Error.";
+    hideSuggest(); // NEW
   }finally{
     spin.style.display = "none";
   }
@@ -222,6 +273,7 @@ clearBtn.addEventListener("click", ()=>{
   out.innerHTML = "Start typing to see results.";
   stats.textContent = "Ready.";
   err.style.display = "none";
+  hideSuggest(); // NEW
 });
 window.addEventListener("keydown", (ev)=>{
   if(ev.key === "Escape"){
