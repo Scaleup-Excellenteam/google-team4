@@ -7,7 +7,13 @@ from ..models import Corpus, Sentence
 from ..normalize import kgrams
 from ..config import GRAM, MAX_CANDIDATES
 
-VERBOSE = os.environ.get("AUTOCOMPLETE_VERBOSE") == "1"
+from collections import defaultdict
+import bisect, re
+from typing import Dict, List, Tuple, Iterable, Iterator, Optional
+
+_TOKEN_RE = re.compile(r"\w+")  # tokenize normalized sentences into "words"
+
+VERBOSE = os.environ.get("AUTOCOMPLETE_VERBOSE") == "1" # Progress logging (set AUTOCOMPLETE_VERBOSE=1 to enable)
 
 class KGramIndex:
     """
@@ -20,6 +26,10 @@ class KGramIndex:
         self._get_sentence: Callable[[int], Sentence] | None = None
         self._num_sentences: int = 0
 
+        # /* ~~~ NEW: word-prefix structures ~~~ */
+        self._term_lex: List[str] = []
+        self._postings: Dict[str, List[Tuple[int, int]]] = {}  # term -> [(sid, tok_pos)
+
     # ---- Build (offline) ----
     def build(self, corpus: Corpus) -> None:
         # Aggregate postings per gram (fewer Python calls)
@@ -31,6 +41,9 @@ class KGramIndex:
         self.attach_corpus(lambda sid: corpus.sentences[sid], len(corpus.sentences))
         if VERBOSE:
             print(f"[indexing bst done] grams={len(buckets):,}")
+
+        # Build word prefix index
+        self._build_word_prefix_index(corpus)
 
     # ---- Corpus provider ----
     def attach_corpus(self, getter: Callable[[int], Sentence], n: int) -> None:
@@ -110,3 +123,80 @@ class KGramIndex:
     def __setstate__(self, state):
         # Loader will re-attach a real getter via attach_corpus()
         self.__dict__.update(state)
+
+
+    # ---- Word prefix index ----
+    def _build_word_prefix_index(self, corpus) -> None:
+        """
+        /* ~~~ Build a positional inverted index over normalized *words*.
+           - For each normalized word token, store (sentence_id, token_position)
+           - Keep a sorted lexicon for quick prefix scans (bisect) ~~~ */
+        """
+        buckets: Dict[str, List[Tuple[int,int]]] = defaultdict(list)
+        for sid, s in enumerate(corpus.sentences):
+            toks = _TOKEN_RE.findall(s.normalized)
+            for tpos, tok in enumerate(toks):
+                buckets[tok].append((sid, tpos))
+        self._term_lex = sorted(buckets.keys())
+        self._postings = dict(buckets)
+
+    # ---- Candidates for prefix queries ----
+    def candidates_for_prefix_query(self, query: str,
+                                    max_terms: int,
+                                    max_candidates: int) -> Iterable[int]:
+        """
+        /* ~~~ Return sentence IDs that *could* contain the query as:
+               - whole words for all tokens except the last, which is a **prefix**, OR
+               - a 1-edit variant (substitution / single added / single missing).
+           NOTE: We keep this generous; the scorer will enforce the 1-edit rule. ~~~ */
+        """
+        # tokenize query (normalized earlier in search)
+        q_toks = _TOKEN_RE.findall(query)
+        if not q_toks:
+            return []
+
+        exact = q_toks[:-1]
+        last  = q_toks[-1]
+
+        # --- 1) prefix range for the last token in lexicon
+        L = self._term_lex
+        lo = bisect.bisect_left(L, last)
+        hi = bisect.bisect_right(L, last + "\uffff")
+        if hi - lo > max_terms:
+            hi = lo + max_terms
+        last_terms = L[lo:hi]
+
+        # --- 2) expand by tokens that are within 1 edit of last (tolerant)
+        def within_1_edit(a: str, b: str) -> bool:
+            if a == b: return True
+            if abs(len(a)-len(b)) > 1: return False
+            # substitution
+            if len(a) == len(b):
+                return sum(x!=y for x,y in zip(a,b)) == 1
+            # insert/delete
+            if len(a) > len(b): a, b = b, a  # ensure a is shorter
+            i = j = 0; diff = 0
+            while i < len(a) and j < len(b):
+                if a[i] == b[j]:
+                    i += 1; j += 1
+                else:
+                    diff += 1; j += 1
+                    if diff > 1: return False
+            return True  # tail diff counts as at most one
+        # add tolerant neighbors (bounded by max_terms too)
+        # scan a narrow lexicon band around the last token
+        w_lo = max(0, lo - 2000); w_hi = min(len(L), hi + 2000)
+        for t in L[w_lo:w_hi]:
+            if within_1_edit(last, t) and t not in last_terms:
+                last_terms.append(t)
+                if len(last_terms) >= max_terms:
+                    break
+
+        # --- aggregate sentence IDs via postings of candidate last terms
+        sid_hits = set()
+        for term in last_terms:
+            for sid, _ in self._postings.get(term, ()):
+                sid_hits.add(sid)
+                if len(sid_hits) >= max_candidates:
+                    return sid_hits
+        return sid_hits

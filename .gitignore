@@ -1,0 +1,10 @@
+.venv
+auto_complete/Archive/
+auto_complete/src/__pycache__/
+auto_complete/src/src.zip
+src.zip
+__pycache__/
+corpus.sqlite
+corpus.*
+artifacts.pkl
+.pytest_cache/

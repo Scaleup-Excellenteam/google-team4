@@ -4,6 +4,73 @@ from .models import AutoCompleteData, Sentence
 from .normalize import normalize_only
 from .DB.index import KGramIndex
 from .config import TOP_K
+import re
+from . import config as CFG
+
+# Normalize and clean the query string for prefix matching
+
+# /* ~~~ keep only letters+spaces, lowercase; drop punctuation ~~~ */
+_KEEP = re.compile(r"[a-z ]")
+
+def _clean(s: str) -> str:
+    s = s.lower()
+    return "".join(ch for ch in s if _KEEP.fullmatch(ch))
+
+def _p_incorrect(pos: int) -> int:
+    # 1→-5, 2→-4, 3→-3, 4→-2, else→-1
+    return {1:-5, 2:-4, 3:-3, 4:-2}.get(pos, -1)
+
+def _p_addmiss(pos: int) -> int:
+    # 1→-10, 2→-8, 3→-6, 4→-4, else→-2
+    return {1:-10, 2:-8, 3:-6, 4:-4}.get(pos, -2)
+
+def score_prefix_1edit(query_raw: str, target_raw: str) -> int | None:
+    """
+    /* ~~~ Returns numeric score, or None if >1 edit is needed.
+       Base = 2 * min(len(clean(query)), len(clean(target))).
+       - Substitution: at most one differing position
+       - Added/Missing: length differs by exactly 1 (penalty by first divergence) ~~~ */
+    """
+    q = _clean(query_raw)
+    t = _clean(target_raw)
+    base = 2 * min(len(q), len(t))
+
+    if len(q) == len(t):
+        diffs = [i for i,(a,b) in enumerate(zip(q,t), start=1) if a != b]
+        if not diffs:
+            return base
+        return base + _p_incorrect(diffs[0]) if len(diffs) == 1 else None
+
+    if abs(len(q) - len(t)) == 1:
+        # find first divergence position (1-based)
+        i = 0
+        L = min(len(q), len(t))
+        while i < L and q[i] == t[i]:
+            i += 1
+        pos = i + 1  # if divergence at end, this is L+1
+        return base + _p_addmiss(pos)
+
+    return None
+
+
+_WORD = r"\w+"
+
+def _compile_prefix_pattern(query_norm: str) -> re.Pattern:
+    """
+    /* ~~~ Build pattern matching: all full words of query except last; last as word-prefix.
+           Example: "to be" -> r"\bto\s+be\w*" ~~~ */
+    """
+    toks = re.findall(_WORD, query_norm)
+    if not toks:
+        return re.compile(r"$a")  # never matches
+    if len(toks) == 1:
+        pfx = re.escape(toks[0])
+        return re.compile(rf"\b{pfx}\w*")
+    head = r"\s+".join(re.escape(t) for t in toks[:-1])
+    pfx  = re.escape(toks[-1])
+    return re.compile(rf"\b{head}\s+{pfx}\w*")
+
+
 
 # Penalty tables by 1-based position
 _REPLACE = {1: 5, 2: 4, 3: 3, 4: 2}
@@ -149,31 +216,83 @@ def _best_match_in_sentence(s: Sentence, q_norm: str) -> Optional[tuple[int, int
         return None
     return (best[0], best[1], best[2])
 
-def complete_query(query: str, index: KGramIndex, top_k: int = TOP_K) -> List[AutoCompleteData]:
-    """Complete the query against the index, returning top-k results."""
+# --- ADD THIS: legacy substring fallback used when SEARCH_MODE != "prefix" ---
+def complete_query_substring(query: str, index: KGramIndex, top_k: int):
+    """
+    Legacy substring path.
+    Uses the helpers in this file (_best_match_in_sentence, normalize_only)
+    so we don't depend on any other module. Safe even if not used when
+    SEARCH_MODE='prefix'.
+    """
     q_norm = normalize_only(query)
-    candidates = index.candidate_ids(q_norm)
+    if not q_norm:
+        return []
 
-    results: list[AutoCompleteData] = []
-    for s in index.iter_sentences(candidates):
-        match = _best_match_in_sentence(s, q_norm) if q_norm else None
-        if match is None:
+    # Candidate IDs: prefer an index method if present; otherwise scan all sids.
+    if hasattr(index, "candidates_for_substring"):
+        cand_ids = index.candidates_for_substring(q_norm)  # type: ignore[attr-defined]
+    else:
+        cand_ids = range(getattr(index, "_num_sentences", 0))
+
+    rows = []
+    for s in index.iter_sentences(cand_ids):
+        best = _best_match_in_sentence(s, q_norm)
+        if not best:
             continue
-        score, start_norm, _win_len = match
-        # Map normalized start -> original char index (in concatenated original block)
-        start_orig_char = 0
-        if s.norm_to_orig and 0 <= start_norm < len(s.norm_to_orig):
-            start_orig_char = s.norm_to_orig[start_norm]
-        # Convert to (line_no, col), allowing multi-line blocks
-        line_no, col = _line_col_from_concat(s.original, start_orig_char, s.line_no)
+        score, start, win_len = best
+        rows.append({
+            "score": int(score),
+            "offset": [int(start), int(start + win_len)],
+            "source_text": getattr(s, "path", "") or "",
+            "completed_sentence": s.original,
+        })
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    return rows[:top_k]
+# --- END ADD ---
 
-        ac = AutoCompleteData(
-            completed_sentence=s.original,
-            source_text=s.path,
-            offset=(line_no, col),
-            score=score
-        )
-        results.append(ac)
+def complete_query(query: str, index, top_k: int):
+    """
+    /* ~~~ When SEARCH_MODE='prefix':
+           - candidate SIDs come from word-prefix index (with 1-edit expansion on last token)
+           - span is found via regex on s.normalized
+           - score uses sheet's 1-edit rules
+           Otherwise, fall back to your legacy substring path. ~~~ */
+    """
+    if getattr(CFG, "SEARCH_MODE", "substring") != "prefix":
+        # --- legacy flow (unchanged) ---
+        return complete_query_substring(query, index, top_k)  # whatever you call it now
 
-    results.sort(key=lambda a: (-a.score, a.completed_sentence))
-    return results[:top_k]
+    # --- prefix flow ---
+    max_terms = getattr(CFG, "MAX_PREFIX_TERMS", 5000)
+    max_cands = getattr(CFG, "MAX_PREFIX_CANDIDATES", 20000)
+
+    # pattern over normalized sentence (for offset extraction)
+    pat = _compile_prefix_pattern(query)
+
+    # 1) get candidate SIDs
+    cand_sids = index.candidates_for_prefix_query(query, max_terms, max_cands)
+
+    rows = []
+    for s in index.iter_sentences(cand_sids):
+        m = pat.search(s.normalized)
+        if not m:
+            continue
+        start, end = m.span()
+        # Extract the matched substring from ORIGINAL text for display/scoring;
+        # scoring cleans punctuation anyway, so original is fine.
+        target_raw = s.original[start:end]
+
+        sc = score_prefix_1edit(query, target_raw)
+        if sc is None:
+            continue
+
+        # /* ~~~ Build your row type. Replace with your project's data class if needed. ~~~ */
+        rows.append({
+            "score": int(sc),
+            "offset": [int(start), int(end)],
+            "source_text": getattr(s, "path", "") or "",
+            "completed_sentence": s.original,
+        })
+
+    rows.sort(key=lambda r: r["score"], reverse=True)
+    return rows[:top_k]

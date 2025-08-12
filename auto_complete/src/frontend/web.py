@@ -15,8 +15,7 @@ def api_complete():
     if not q:
         return jsonify([])
     rows = _engine.complete(q, top_k=k)  # type: ignore
-    return jsonify([r.__dict__ for r in rows])
-
+    return jsonify(rows)
 # ---------- UI ----------
 @app.get("/")
 def home():

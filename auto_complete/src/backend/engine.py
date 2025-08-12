@@ -120,6 +120,8 @@ class Engine:
         log.info("Initializing corpus store: %s", dsn)
         self._store = make_store(dsn, corpus=corpus)
 
+        
+
         if self._store.count() == 0:               # seed SQLite on first build
             self._store.bulk_create(corpus.sentences)
 

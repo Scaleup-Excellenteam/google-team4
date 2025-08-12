@@ -8,39 +8,30 @@
 │   │   ├── corpusdb.py
 │   │   ├── index.py
 │   │   ├── memory_store.py
-│   │   ├── __pycache__
-│   │   │   ├── acx.cpython-313.pyc
-│   │   │   ├── api.cpython-313.pyc
-│   │   │   ├── corpusdb.cpython-313.pyc
-│   │   │   ├── index.cpython-313.pyc
-│   │   │   ├── sqlite_store.cpython-313.pyc
-│   │   │   └── storage.cpython-313.pyc
 │   │   ├── sqlite_store.py
-│   │   └── storage.py
+│   │   ├── storage.py
+│   │   └── store_base.py
 │   ├── engine.py
 │   ├── __init__.py
 │   ├── loader.py
 │   ├── models.py
 │   ├── normalize.py
-│   ├── __pycache__
-│   │   ├── bst.cpython-313.pyc
-│   │   ├── config.cpython-313.pyc
-│   │   ├── engine.cpython-313.pyc
-│   │   ├── __init__.cpython-313.pyc
-│   │   ├── loader.cpython-313.pyc
-│   │   ├── models.cpython-313.pyc
-│   │   ├── normalize.cpython-313.pyc
-│   │   └── search.cpython-313.pyc
 │   └── search.py
 ├── e2e
+│   ├── test_frontend_complete_api_json.py
+│   ├── test_frontend_health_or_fallback.py
+│   ├── test_frontend_home_page_renders.py
+│   ├── test_integration_build_memory_complete.py
+│   ├── test_integration_empty_and_short_query.py
+│   ├── test_integration_multiple_roots.py
+│   ├── test_integration_persist_acx_cdb_reload_query.py
+│   ├── test_integration_result_schema_sanity.py
+│   ├── test_integration_topk_limit_and_types.py
+│   └── test_integration_unicode_normalization.py
 ├── frontend
 │   ├── __init__.py
 │   ├── __main__.py
-│   ├── __pycache__
-│   │   ├── __init__.cpython-313.pyc
-│   │   ├── __main__.cpython-313.pyc
-│   │   └── web.cpython-313.pyc
 │   └── web.py
 └── tree.txt
 
-8 directories, 36 files
+5 directories, 30 files
